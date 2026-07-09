@@ -6,6 +6,8 @@ import * as mp from './multiplayer';
 const canvas = document.querySelector<HTMLCanvasElement>('#game')!;
 const ctx = canvas.getContext('2d')!;
 const scoreEl = document.querySelector<HTMLSpanElement>('#score')!;
+const heartsEl = document.querySelector<HTMLDivElement>('#hearts')!;
+const expFillEl = document.querySelector<HTMLDivElement>('#exp-fill')!;
 const hintEl = document.querySelector<HTMLDivElement>('#hint')!;
 const onlineCountEl = document.querySelector<HTMLSpanElement>('#online-count')!;
 
@@ -42,6 +44,9 @@ const PALETTE = {
   coinEdge: '#E8A400',
   obstacle: '#78716c',
   obstacleEdge: '#44403c',
+  platform: '#c98a4f',
+  platformTop: '#e6ac72',
+  platformEdge: '#7a4b28',
 };
 
 const BURST_COLORS = ['#ff5a5f', '#FFD23F', '#4ade80', '#38bdf8', '#f472b6'];
@@ -215,6 +220,7 @@ const player = {
   vx: 0,
   vy: 0,
   onGround: true,
+  surface: null as Platform | null, // platform currently stood on, null = ground
   facing: 1,
   squashX: 1,
   squashY: 1,
@@ -228,6 +234,7 @@ function resetPlayer() {
   player.vx = 0;
   player.vy = 0;
   player.onGround = true;
+  player.surface = null;
   player.hitFlash = 0;
   player.hitCooldown = 0;
 }
@@ -239,15 +246,26 @@ function updatePlayer(dt: number) {
   let moveInput = 0;
   if (isDown('arrowleft', 'a')) moveInput -= 1;
   if (isDown('arrowright', 'd')) moveInput += 1;
+  (window as any).__frameLog = (window as any).__frameLog || [];
+  (window as any).__frameLog.push({ t: performance.now(), keys: [...keys], moveInput });
+  if ((window as any).__frameLog.length > 200) (window as any).__frameLog.shift();
 
-  player.vx = moveInput * MOVE_SPEED;
+  player.vx = moveInput * MOVE_SPEED * statMultiplier;
   if (moveInput !== 0) player.facing = moveInput > 0 ? 1 : -1;
+
+  player.x += player.vx * dt;
+  player.x = Math.max(PLAYER_W / 2 + 12, Math.min(width - PLAYER_W / 2 - 12, player.x));
+
+  // walked off the edge of the platform we were standing on
+  if (player.onGround && player.surface && !surfaceContainsX(player.surface, player.x)) {
+    player.onGround = false;
+  }
 
   const wantsJump = isDown('arrowup', 'w', ' ');
   if (wantsJump && player.onGround) {
-    player.vy = JUMP_VELOCITY;
+    player.vy = JUMP_VELOCITY * statMultiplier;
     player.onGround = false;
-    spawnBurst(player.x, groundY, 10, {
+    spawnBurst(player.x, groundY - player.y, 10, {
       speed: 200,
       colors: ['#ffffff', '#d7d7ff'],
       gravity: 600,
@@ -263,25 +281,33 @@ function updatePlayer(dt: number) {
     player.vy += GRAVITY * dt;
   }
 
-  player.x += player.vx * dt;
-  player.y -= player.vy * dt;
+  const oldY = player.y;
+  const newY = oldY - player.vy * dt;
 
-  player.x = Math.max(PLAYER_W / 2 + 12, Math.min(width - PLAYER_W / 2 - 12, player.x));
-
-  if (player.y <= 0) {
-    if (!wasOnGround) {
-      spawnBurst(player.x, groundY, 8, {
-        speed: 160,
-        colors: ['#ffffff', '#d7d7ff'],
-        gravity: 700,
-        size: 4,
-      });
-      player.squashY = 0.7;
-      player.squashX = 1.3;
+  let landed = false;
+  if (player.vy >= 0) {
+    const landing = findLanding(oldY, newY, player.x);
+    if (landing) {
+      if (!wasOnGround) {
+        spawnBurst(player.x, groundY - landing.y, 8, {
+          speed: 160,
+          colors: ['#ffffff', '#d7d7ff'],
+          gravity: 700,
+          size: 4,
+        });
+        player.squashY = 0.7;
+        player.squashX = 1.3;
+      }
+      player.y = landing.y;
+      player.vy = 0;
+      player.onGround = true;
+      player.surface = landing.platform;
+      landed = true;
     }
-    player.y = 0;
-    player.vy = 0;
-    player.onGround = true;
+  }
+
+  if (!landed) {
+    player.y = Math.max(0, newY);
   }
 
   const targetY = player.onGround ? 1 : player.vy < 0 ? 1.12 : 0.94;
@@ -338,12 +364,76 @@ const STAGE_3: PlayerStage = {
 };
 
 const PLAYER_STAGES = [STAGE_3, STAGE_2, STAGE_1, STAGE_0];
+const PLAYER_STAGES_ASC = [STAGE_0, STAGE_1, STAGE_2, STAGE_3];
 
 function getPlayerStage(score: number): PlayerStage {
   for (const stage of PLAYER_STAGES) {
     if (score >= stage.minScore) return stage;
   }
   return STAGE_0;
+}
+
+function getNextStage(stage: PlayerStage): PlayerStage | null {
+  const idx = PLAYER_STAGES_ASC.findIndex((s) => s.index === stage.index);
+  return idx >= 0 && idx < PLAYER_STAGES_ASC.length - 1 ? PLAYER_STAGES_ASC[idx + 1] : null;
+}
+
+// ---------- Health & progression ----------
+// score doubles as the EXP bar (current stage progress); hearts and the
+// speed/jump stat boost are permanent rewards for the highest stage ever
+// reached, so they don't regress if score later drops.
+
+const BASE_HEARTS = 3;
+const STAT_BOOST_PER_STAGE = 0.08;
+
+let heartBonus = 0;
+let maxHearts = BASE_HEARTS;
+let hearts = BASE_HEARTS;
+let statMultiplier = 1;
+
+function renderHearts() {
+  heartsEl.innerHTML = '';
+  for (let i = 0; i < maxHearts; i++) {
+    const span = document.createElement('span');
+    span.className = i < hearts ? 'heart' : 'heart empty';
+    span.textContent = '♥';
+    heartsEl.appendChild(span);
+  }
+}
+
+function renderExpBar() {
+  const stage = getPlayerStage(score);
+  const next = getNextStage(stage);
+  let pct = 1;
+  if (next) {
+    const span = next.minScore - stage.minScore;
+    pct = span > 0 ? (score - stage.minScore) / span : 1;
+  }
+  expFillEl.style.width = `${Math.max(0, Math.min(1, pct)) * 100}%`;
+}
+
+function applyStageBonus(stage: PlayerStage) {
+  if (stage.index <= heartBonus) return;
+  heartBonus = stage.index;
+  maxHearts = BASE_HEARTS + heartBonus;
+  hearts = maxHearts;
+  statMultiplier = 1 + heartBonus * STAT_BOOST_PER_STAGE;
+  renderHearts();
+}
+
+function loseHeart() {
+  hearts = Math.max(0, hearts - 1);
+  renderHearts();
+  if (hearts <= 0) {
+    score = 0;
+    heartBonus = 0;
+    maxHearts = BASE_HEARTS;
+    hearts = BASE_HEARTS;
+    statMultiplier = 1;
+    scoreEl.textContent = '0';
+    renderHearts();
+    renderExpBar();
+  }
 }
 
 function roundRect(x: number, y: number, w: number, h: number, r: number) {
@@ -579,6 +669,7 @@ function collectCoin(index: number, screenX: number, screenY: number) {
   mp.broadcastCoinCollected(removedId, { id: newCoin.id, x: newCoin.x / width, y: newCoin.y });
   score += 1;
   scoreEl.textContent = String(score);
+  renderExpBar();
   spawnBurst(screenX, screenY, 16, {
     speed: 320,
     colors: [PALETTE.coin, PALETTE.coinEdge, '#ffffff'],
@@ -591,6 +682,7 @@ function collectCoin(index: number, screenX: number, screenY: number) {
   const newStage = getPlayerStage(score);
   if (newStage.index !== prevStage.index) {
     triggerTransformation();
+    applyStageBonus(newStage);
   }
 }
 
@@ -604,6 +696,83 @@ function checkCoinCollisions() {
     if (dist < COIN_RADIUS + PLAYER_W * 0.32) {
       collectCoin(i, c.x, groundY - c.y);
     }
+  }
+}
+
+// ---------- Floating platforms ----------
+
+interface Platform {
+  x: number; // center x
+  y: number; // height above ground of the top surface
+  w: number;
+}
+
+const PLATFORM_H = 20;
+const platforms: Platform[] = [];
+
+function surfaceContainsX(p: Platform, x: number): boolean {
+  const halfW = p.w / 2;
+  return x >= p.x - halfW && x <= p.x + halfW;
+}
+
+// finds the highest surface (platform or ground) the player crossed while
+// falling from oldY to newY at the given x; returns null if none crossed.
+function findLanding(
+  oldY: number,
+  newY: number,
+  x: number,
+): { y: number; platform: Platform | null } | null {
+  let best: { y: number; platform: Platform | null } | null = null;
+  for (const p of platforms) {
+    if (!surfaceContainsX(p, x)) continue;
+    if (p.y <= oldY + 0.5 && p.y >= newY - 0.5) {
+      if (!best || p.y > best.y) best = { y: p.y, platform: p };
+    }
+  }
+  if (0 <= oldY + 0.5 && 0 >= newY - 0.5) {
+    if (!best || 0 > best.y) best = { y: 0, platform: null };
+  }
+  return best;
+}
+
+function initPlatforms() {
+  platforms.length = 0;
+  const margin = 90;
+  const stepCount = 5 + Math.floor(Math.random() * 3); // 5-7 platforms
+  let x = margin + Math.random() * (width - margin * 2);
+  let y = 90 + Math.random() * 40;
+  let dir = Math.random() < 0.5 ? 1 : -1;
+
+  for (let i = 0; i < stepCount; i++) {
+    const w = 100 + Math.random() * 70;
+    platforms.push({ x, y, w });
+
+    if (Math.random() < 0.35) dir *= -1;
+    const dx = (110 + Math.random() * 90) * dir;
+    let nx = x + dx;
+    if (nx < margin || nx > width - margin) {
+      dir *= -1;
+      nx = x - dx;
+    }
+    nx = Math.max(margin, Math.min(width - margin, nx));
+
+    const dy = 60 + Math.random() * 70;
+    const ny = Math.min(y + dy, height - 160);
+
+    x = nx;
+    y = ny;
+  }
+}
+
+function drawPlatforms() {
+  for (const p of platforms) {
+    const screenY = groundY - p.y;
+    ctx.fillStyle = PALETTE.platformEdge;
+    ctx.fillRect(p.x - p.w / 2, screenY, p.w, PLATFORM_H);
+    ctx.fillStyle = PALETTE.platform;
+    ctx.fillRect(p.x - p.w / 2, screenY, p.w, PLATFORM_H - 6);
+    ctx.fillStyle = PALETTE.platformTop;
+    ctx.fillRect(p.x - p.w / 2, screenY, p.w, 4);
   }
 }
 
@@ -692,6 +861,14 @@ function hitObstacle(o: Obstacle) {
     size: 5,
   });
   triggerShake(8, 0.22);
+
+  if (score > 0) {
+    score = Math.floor(score / 2);
+    scoreEl.textContent = String(score);
+    renderExpBar();
+  } else {
+    loseHeart();
+  }
 }
 
 function checkObstacleCollisions() {
@@ -762,6 +939,7 @@ function frame(now: number) {
   }
 
   drawBackground();
+  drawPlatforms();
   drawObstacles();
   drawCoins();
   drawRemotePlayers();
@@ -777,9 +955,14 @@ function frame(now: number) {
 // ---------- Boot ----------
 
 resize();
+initPlatforms();
 resetPlayer();
 initCoins();
 initObstacles();
+renderHearts();
+renderExpBar();
 mp.onCoinEvent(applyRemoteCoin);
 mp.initMultiplayer();
 requestAnimationFrame(frame);
+
+(window as any).__debug = { player, keys, platforms, coins, width, height, groundY, isDown, updatePlayer };
