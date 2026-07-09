@@ -1,4 +1,5 @@
 import './style.css';
+import * as mp from './multiplayer';
 
 // ---------- Canvas setup ----------
 
@@ -6,6 +7,7 @@ const canvas = document.querySelector<HTMLCanvasElement>('#game')!;
 const ctx = canvas.getContext('2d')!;
 const scoreEl = document.querySelector<HTMLSpanElement>('#score')!;
 const hintEl = document.querySelector<HTMLDivElement>('#hint')!;
+const onlineCountEl = document.querySelector<HTMLSpanElement>('#online-count')!;
 
 let width = 0;
 let height = 0;
@@ -396,6 +398,52 @@ function drawPlayerAccessory(stage: PlayerStage, w: number, h: number) {
   }
 }
 
+function drawCharacterBody(
+  w: number,
+  h: number,
+  stage: PlayerStage,
+  fill: string,
+  stroke: string,
+  facing: number,
+  hitFlash: number,
+) {
+  if (hitFlash > 0) ctx.filter = 'invert(1)';
+
+  drawPlayerAccessory({ ...stage, fill, stroke }, w, h);
+
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = 3;
+  roundRect(-w / 2, -h / 2, w, h, stage.cornerRadius);
+  ctx.fill();
+  ctx.stroke();
+
+  const eyeOffsetX = facing * w * 0.16;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(eyeOffsetX - 2, -h * 0.08, 8, 0, Math.PI * 2);
+  ctx.arc(eyeOffsetX + 14, -h * 0.08, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = PALETTE.playerEye;
+  ctx.beginPath();
+  ctx.arc(eyeOffsetX - 2 + facing * 2, -h * 0.08, 3.5, 0, Math.PI * 2);
+  ctx.arc(eyeOffsetX + 14 + facing * 2, -h * 0.08, 3.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.filter = 'none';
+}
+
+function drawCharacterShadow(cx: number, yHeight: number, scale: number, alpha: number) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#000000';
+  const shadowScale = Math.max(0.35, 1 - yHeight / MAX_JUMP_HEIGHT) * scale;
+  ctx.beginPath();
+  ctx.ellipse(cx, groundY, 22 * shadowScale, 7 * shadowScale, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawPlayer() {
   const stage = getPlayerStage(score);
   const screenY = groundY - player.y;
@@ -404,47 +452,38 @@ function drawPlayer() {
   const cx = player.x;
   const cy = screenY - h / 2;
 
-  // shadow
-  ctx.save();
-  ctx.globalAlpha = Math.max(0.12, 0.32 - player.y / 500);
-  ctx.fillStyle = '#000000';
-  const shadowScale = Math.max(0.35, 1 - player.y / MAX_JUMP_HEIGHT) * stage.scale;
-  ctx.beginPath();
-  ctx.ellipse(cx, groundY, 22 * shadowScale, 7 * shadowScale, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
+  drawCharacterShadow(cx, player.y, stage.scale, Math.max(0.12, 0.32 - player.y / 500));
 
   ctx.save();
   ctx.translate(cx, cy);
-  if (player.hitFlash > 0) ctx.filter = 'invert(1)';
-
-  drawPlayerAccessory(stage, w, h);
-
-  ctx.fillStyle = stage.fill;
-  ctx.strokeStyle = stage.stroke;
-  ctx.lineWidth = 3;
-  roundRect(-w / 2, -h / 2, w, h, stage.cornerRadius);
-  ctx.fill();
-  ctx.stroke();
-
-  const eyeOffsetX = player.facing * w * 0.16;
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath();
-  ctx.arc(eyeOffsetX - 2, -h * 0.08, 8, 0, Math.PI * 2);
-  ctx.arc(eyeOffsetX + 14, -h * 0.08, 8, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = PALETTE.playerEye;
-  ctx.beginPath();
-  ctx.arc(eyeOffsetX - 2 + player.facing * 2, -h * 0.08, 3.5, 0, Math.PI * 2);
-  ctx.arc(eyeOffsetX + 14 + player.facing * 2, -h * 0.08, 3.5, 0, Math.PI * 2);
-  ctx.fill();
-
+  drawCharacterBody(w, h, stage, stage.fill, stage.stroke, player.facing, player.hitFlash);
   ctx.restore();
+}
+
+function drawRemotePlayers() {
+  for (const p of mp.getRemotePlayers()) {
+    const stage = getPlayerStage(p.score);
+    const px = p.x * width;
+    const screenY = groundY - p.y;
+    const w = PLAYER_W * p.squashX * stage.scale;
+    const h = PLAYER_H * p.squashY * stage.scale;
+    const cy = screenY - h / 2;
+
+    ctx.globalAlpha = 0.88;
+    drawCharacterShadow(px, p.y, stage.scale, Math.max(0.1, 0.28 - p.y / 500));
+
+    ctx.save();
+    ctx.translate(px, cy);
+    drawCharacterBody(w, h, stage, p.color, '#1a1a1a', p.facing, 0);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
 }
 
 // ---------- Coins ----------
 
 interface Coin {
+  id: string;
   x: number;
   y: number; // height above ground
   bob: number;
@@ -454,6 +493,12 @@ interface Coin {
 const COIN_COUNT = 3;
 const COIN_RADIUS = 16;
 const coins: Coin[] = [];
+
+function randomId(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `id-${Math.random().toString(36).slice(2)}`;
+}
 
 function randomCoinPosition(): { x: number; y: number } {
   const margin = 50;
@@ -467,7 +512,21 @@ function randomCoinPosition(): { x: number; y: number } {
 
 function spawnCoin(): Coin {
   const { x, y } = randomCoinPosition();
-  return { x, y, bob: Math.random() * Math.PI * 2, spin: 0 };
+  return { id: randomId(), x, y, bob: Math.random() * Math.PI * 2, spin: 0 };
+}
+
+function applyRemoteCoin(removedId: string, payload: mp.CoinPayload) {
+  const idx = coins.findIndex((c) => c.id === removedId);
+  if (idx !== -1) coins.splice(idx, 1);
+  if (!coins.some((c) => c.id === payload.id)) {
+    coins.push({
+      id: payload.id,
+      x: payload.x * width,
+      y: payload.y,
+      bob: Math.random() * Math.PI * 2,
+      spin: 0,
+    });
+  }
 }
 
 function initCoins() {
@@ -513,8 +572,11 @@ function triggerTransformation() {
 
 function collectCoin(index: number, screenX: number, screenY: number) {
   const prevStage = getPlayerStage(score);
+  const removedId = coins[index].id;
   coins.splice(index, 1);
-  coins.push(spawnCoin());
+  const newCoin = spawnCoin();
+  coins.push(newCoin);
+  mp.broadcastCoinCollected(removedId, { id: newCoin.id, x: newCoin.x / width, y: newCoin.y });
   score += 1;
   scoreEl.textContent = String(score);
   spawnBurst(screenX, screenY, 16, {
@@ -675,8 +737,22 @@ function frame(now: number) {
   updateParticles(dt);
   updatePopups(dt);
   updateShake(dt);
+  mp.updateRemotePlayers(dt);
   checkCoinCollisions();
   checkObstacleCollisions();
+
+  mp.sendPlayerState({
+    x: player.x / width,
+    y: player.y,
+    facing: player.facing,
+    squashX: player.squashX,
+    squashY: player.squashY,
+    score,
+  });
+  const online = mp.onlineCount();
+  if (onlineCountEl.textContent !== String(online)) {
+    onlineCountEl.textContent = String(online);
+  }
 
   ctx.save();
   if (shakeTime > 0) {
@@ -688,6 +764,7 @@ function frame(now: number) {
   drawBackground();
   drawObstacles();
   drawCoins();
+  drawRemotePlayers();
   drawPlayer();
   drawParticles();
   drawPopups();
@@ -703,4 +780,6 @@ resize();
 resetPlayer();
 initCoins();
 initObstacles();
+mp.onCoinEvent(applyRemoteCoin);
+mp.initMultiplayer();
 requestAnimationFrame(frame);
