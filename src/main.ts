@@ -38,6 +38,8 @@ const PALETTE = {
   playerEye: '#1a1a1a',
   coin: '#FFD23F',
   coinEdge: '#E8A400',
+  obstacle: '#78716c',
+  obstacleEdge: '#44403c',
 };
 
 const BURST_COLORS = ['#ff5a5f', '#FFD23F', '#4ade80', '#38bdf8', '#f472b6'];
@@ -214,6 +216,8 @@ const player = {
   facing: 1,
   squashX: 1,
   squashY: 1,
+  hitFlash: 0,
+  hitCooldown: 0,
 };
 
 function resetPlayer() {
@@ -222,9 +226,14 @@ function resetPlayer() {
   player.vx = 0;
   player.vy = 0;
   player.onGround = true;
+  player.hitFlash = 0;
+  player.hitCooldown = 0;
 }
 
 function updatePlayer(dt: number) {
+  if (player.hitFlash > 0) player.hitFlash = Math.max(0, player.hitFlash - dt);
+  if (player.hitCooldown > 0) player.hitCooldown = Math.max(0, player.hitCooldown - dt);
+
   let moveInput = 0;
   if (isDown('arrowleft', 'a')) moveInput -= 1;
   if (isDown('arrowright', 'd')) moveInput += 1;
@@ -279,6 +288,62 @@ function updatePlayer(dt: number) {
   player.squashX += (targetX - player.squashX) * Math.min(1, dt * 14);
 }
 
+interface PlayerStage {
+  index: number;
+  minScore: number;
+  scale: number;
+  cornerRadius: number;
+  fill: string;
+  stroke: string;
+  accessory: 'none' | 'ears' | 'spikes' | 'halo';
+}
+
+const STAGE_0: PlayerStage = {
+  index: 0,
+  minScore: 0,
+  scale: 1,
+  cornerRadius: 14,
+  fill: PALETTE.player,
+  stroke: PALETTE.playerDark,
+  accessory: 'none',
+};
+const STAGE_1: PlayerStage = {
+  index: 1,
+  minScore: 10,
+  scale: 1.15,
+  cornerRadius: 20,
+  fill: '#4ade80',
+  stroke: '#2f9e56',
+  accessory: 'ears',
+};
+const STAGE_2: PlayerStage = {
+  index: 2,
+  minScore: 25,
+  scale: 1.3,
+  cornerRadius: 24,
+  fill: '#38bdf8',
+  stroke: '#1d7fae',
+  accessory: 'spikes',
+};
+const STAGE_3: PlayerStage = {
+  index: 3,
+  minScore: 50,
+  scale: 1.5,
+  cornerRadius: 28,
+  fill: '#f472b6',
+  stroke: '#c23e82',
+  accessory: 'halo',
+};
+
+const PLAYER_STAGES = [STAGE_3, STAGE_2, STAGE_1, STAGE_0];
+
+function getPlayerStage(score: number): PlayerStage {
+  for (const stage of PLAYER_STAGES) {
+    if (score >= stage.minScore) return stage;
+  }
+  return STAGE_0;
+}
+
 function roundRect(x: number, y: number, w: number, h: number, r: number) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -289,10 +354,53 @@ function roundRect(x: number, y: number, w: number, h: number, r: number) {
   ctx.closePath();
 }
 
+function drawPlayerAccessory(stage: PlayerStage, w: number, h: number) {
+  if (stage.accessory === 'none') return;
+
+  ctx.fillStyle = stage.fill;
+  ctx.strokeStyle = stage.stroke;
+  ctx.lineWidth = 2.5;
+
+  if (stage.accessory === 'ears') {
+    for (const side of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(side * w * 0.32, -h / 2 + 4);
+      ctx.lineTo(side * w * 0.44, -h / 2 - 12);
+      ctx.lineTo(side * w * 0.2, -h / 2 - 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (stage.accessory === 'spikes') {
+    const spikeCount = 3;
+    const spikeW = w / spikeCount;
+    for (let i = 0; i < spikeCount; i++) {
+      const baseX = -w / 2 + spikeW * i;
+      ctx.beginPath();
+      ctx.moveTo(baseX, -h / 2 + 2);
+      ctx.lineTo(baseX + spikeW / 2, -h / 2 - 16);
+      ctx.lineTo(baseX + spikeW, -h / 2 + 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (stage.accessory === 'halo') {
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = '#FFD23F';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.ellipse(0, -h / 2 - 14, w * 0.34, 7, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 function drawPlayer() {
+  const stage = getPlayerStage(score);
   const screenY = groundY - player.y;
-  const w = PLAYER_W * player.squashX;
-  const h = PLAYER_H * player.squashY;
+  const w = PLAYER_W * player.squashX * stage.scale;
+  const h = PLAYER_H * player.squashY * stage.scale;
   const cx = player.x;
   const cy = screenY - h / 2;
 
@@ -300,7 +408,7 @@ function drawPlayer() {
   ctx.save();
   ctx.globalAlpha = Math.max(0.12, 0.32 - player.y / 500);
   ctx.fillStyle = '#000000';
-  const shadowScale = Math.max(0.35, 1 - player.y / MAX_JUMP_HEIGHT);
+  const shadowScale = Math.max(0.35, 1 - player.y / MAX_JUMP_HEIGHT) * stage.scale;
   ctx.beginPath();
   ctx.ellipse(cx, groundY, 22 * shadowScale, 7 * shadowScale, 0, 0, Math.PI * 2);
   ctx.fill();
@@ -308,11 +416,14 @@ function drawPlayer() {
 
   ctx.save();
   ctx.translate(cx, cy);
+  if (player.hitFlash > 0) ctx.filter = 'invert(1)';
 
-  ctx.fillStyle = PALETTE.player;
-  ctx.strokeStyle = PALETTE.playerDark;
+  drawPlayerAccessory(stage, w, h);
+
+  ctx.fillStyle = stage.fill;
+  ctx.strokeStyle = stage.stroke;
   ctx.lineWidth = 3;
-  roundRect(-w / 2, -h / 2, w, h, 14);
+  roundRect(-w / 2, -h / 2, w, h, stage.cornerRadius);
   ctx.fill();
   ctx.stroke();
 
@@ -389,7 +500,19 @@ function drawCoins() {
   }
 }
 
+function triggerTransformation() {
+  const screenY = groundY - (player.y + PLAYER_H / 2);
+  spawnBurst(player.x, screenY, 36, {
+    speed: 420,
+    colors: [STAGE_0.fill, STAGE_1.fill, STAGE_2.fill, STAGE_3.fill, '#ffffff', PALETTE.coin],
+    gravity: 380,
+    size: 7,
+  });
+  triggerShake(14, 0.35);
+}
+
 function collectCoin(index: number, screenX: number, screenY: number) {
+  const prevStage = getPlayerStage(score);
   coins.splice(index, 1);
   coins.push(spawnCoin());
   score += 1;
@@ -402,6 +525,11 @@ function collectCoin(index: number, screenX: number, screenY: number) {
   });
   spawnPopup(screenX, screenY - 10, '+1');
   triggerShake(6, 0.18);
+
+  const newStage = getPlayerStage(score);
+  if (newStage.index !== prevStage.index) {
+    triggerTransformation();
+  }
 }
 
 function checkCoinCollisions() {
@@ -413,6 +541,106 @@ function checkCoinCollisions() {
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < COIN_RADIUS + PLAYER_W * 0.32) {
       collectCoin(i, c.x, groundY - c.y);
+    }
+  }
+}
+
+// ---------- Obstacles ----------
+
+interface Obstacle {
+  baseX: number;
+  x: number;
+  phase: number;
+  driftSpeed: number;
+  driftRange: number;
+}
+
+const OBSTACLE_W = 30;
+const OBSTACLE_H = 34;
+const obstacles: Obstacle[] = [];
+let obstacleTime = 0;
+
+function randomObstacleBaseX(): number {
+  const margin = 60;
+  return margin + Math.random() * (width - margin * 2);
+}
+
+function spawnObstacle(): Obstacle {
+  const baseX = randomObstacleBaseX();
+  return {
+    baseX,
+    x: baseX,
+    phase: Math.random() * Math.PI * 2,
+    driftSpeed: 0.4 + Math.random() * 0.3,
+    driftRange: 40 + Math.random() * 60,
+  };
+}
+
+function initObstacles() {
+  obstacles.length = 0;
+  const count = 1 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < count; i++) obstacles.push(spawnObstacle());
+}
+
+function updateObstacles(dt: number) {
+  obstacleTime += dt;
+  const half = OBSTACLE_W / 2 + 10;
+  for (const o of obstacles) {
+    o.x = o.baseX + Math.sin(obstacleTime * o.driftSpeed + o.phase) * o.driftRange;
+    o.x = Math.max(half, Math.min(width - half, o.x));
+  }
+}
+
+function drawObstacles() {
+  for (const o of obstacles) {
+    ctx.save();
+    ctx.translate(o.x, groundY);
+    ctx.fillStyle = PALETTE.obstacle;
+    ctx.strokeStyle = PALETTE.obstacleEdge;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-OBSTACLE_W / 2, 0);
+    ctx.lineTo(0, -OBSTACLE_H);
+    ctx.lineTo(OBSTACLE_W / 2, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function hitObstacle(o: Obstacle) {
+  const dir = player.x <= o.x ? -1 : 1;
+  player.x = Math.max(
+    PLAYER_W / 2 + 12,
+    Math.min(width - PLAYER_W / 2 - 12, player.x + dir * 34),
+  );
+  if (player.onGround) {
+    player.vy = JUMP_VELOCITY * 0.45;
+    player.onGround = false;
+  }
+  player.hitFlash = 0.3;
+  player.hitCooldown = 0.5;
+
+  const screenY = groundY - (player.y + PLAYER_H / 2);
+  spawnBurst(player.x, screenY, 12, {
+    speed: 260,
+    colors: [PALETTE.obstacle, PALETTE.obstacleEdge, '#ffffff'],
+    gravity: 700,
+    size: 5,
+  });
+  triggerShake(8, 0.22);
+}
+
+function checkObstacleCollisions() {
+  if (player.hitCooldown > 0) return;
+  for (const o of obstacles) {
+    const dx = Math.abs(player.x - o.x);
+    const overlapsX = dx < OBSTACLE_W / 2 + PLAYER_W * 0.35;
+    const overlapsY = player.y < OBSTACLE_H * 0.8;
+    if (overlapsX && overlapsY) {
+      hitObstacle(o);
+      return;
     }
   }
 }
@@ -443,10 +671,12 @@ function frame(now: number) {
 
   updatePlayer(dt);
   updateCoins(dt);
+  updateObstacles(dt);
   updateParticles(dt);
   updatePopups(dt);
   updateShake(dt);
   checkCoinCollisions();
+  checkObstacleCollisions();
 
   ctx.save();
   if (shakeTime > 0) {
@@ -456,6 +686,7 @@ function frame(now: number) {
   }
 
   drawBackground();
+  drawObstacles();
   drawCoins();
   drawPlayer();
   drawParticles();
@@ -471,4 +702,5 @@ function frame(now: number) {
 resize();
 resetPlayer();
 initCoins();
+initObstacles();
 requestAnimationFrame(frame);
