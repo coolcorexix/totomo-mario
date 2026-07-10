@@ -8,13 +8,28 @@ const ctx = canvas.getContext('2d')!;
 const scoreEl = document.querySelector<HTMLSpanElement>('#score')!;
 const heartsEl = document.querySelector<HTMLDivElement>('#hearts')!;
 const expFillEl = document.querySelector<HTMLDivElement>('#exp-fill')!;
+const parryChipEl = document.querySelector<HTMLDivElement>('#parry-chip')!;
+const dashChipEl = document.querySelector<HTMLDivElement>('#dash-chip')!;
+const jump2ChipEl = document.querySelector<HTMLDivElement>('#jump2-chip')!;
+const glideChipEl = document.querySelector<HTMLDivElement>('#glide-chip')!;
 const hintEl = document.querySelector<HTMLDivElement>('#hint')!;
 const onlineCountEl = document.querySelector<HTMLSpanElement>('#online-count')!;
 
 let width = 0;
 let height = 0;
 let dpr = 1;
-let groundY = 0;
+let groundY = 0; // ground height at the horizontal center of the curve
+
+// the world is the surface of a huge circle (a "little planet"): the ground
+// dips away from center toward the edges, and gravity pulls slightly toward
+// this circle's center rather than straight down
+let planetRadius = 3200;
+let planetCenterX = 0;
+
+function groundYAt(x: number): number {
+  const dx = x - planetCenterX;
+  return groundY + (dx * dx) / (2 * planetRadius);
+}
 
 function resize() {
   dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -26,6 +41,8 @@ function resize() {
   canvas.style.height = `${height}px`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   groundY = height - 64;
+  planetCenterX = width / 2;
+  planetRadius = width * 2.2;
 }
 
 window.addEventListener('resize', resize);
@@ -61,6 +78,7 @@ function markInput() {
     hintShown = false;
     hintEl.classList.add('hidden');
   }
+  ensureAudio();
 }
 
 window.addEventListener('keydown', (e) => {
@@ -76,6 +94,197 @@ window.addEventListener('keyup', (e) => {
 
 function isDown(...names: string[]) {
   return names.some((n) => keys.has(n));
+}
+
+// ---------- Audio ----------
+// the play field doubles as an 88-key piano: a collected coin's x picks the
+// key, so grabbing coins plays as a loose melody. Meteors hit like a kick
+// drum instead, giving the shower its own rhythm section.
+
+const PIANO_LOW_MIDI = 21; // A0
+const PIANO_KEY_COUNT = 88; // ends at C8 (108)
+
+let audioCtx: AudioContext | null = null;
+
+function ensureAudio(): AudioContext | null {
+  const Ctor = window.AudioContext || (window as any).webkitAudioContext;
+  if (!Ctor) return null;
+  if (!audioCtx) audioCtx = new Ctor();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function midiToFreq(note: number): number {
+  return 440 * Math.pow(2, (note - 69) / 12);
+}
+
+function xToMidiNote(x: number): number {
+  const t = Math.max(0, Math.min(1, x / width));
+  return Math.round(PIANO_LOW_MIDI + t * (PIANO_KEY_COUNT - 1));
+}
+
+function applyEcho(ctxA: AudioContext, source: AudioNode, wetLevel = 0.5) {
+  const delay = ctxA.createDelay(1);
+  delay.delayTime.value = 0.22;
+  const feedback = ctxA.createGain();
+  feedback.gain.value = 0.35;
+  const wet = ctxA.createGain();
+  wet.gain.value = wetLevel;
+
+  source.connect(delay);
+  delay.connect(feedback);
+  feedback.connect(delay);
+  delay.connect(wet);
+  wet.connect(ctxA.destination);
+
+  setTimeout(() => {
+    try {
+      source.disconnect(delay);
+      delay.disconnect();
+      feedback.disconnect();
+      wet.disconnect();
+    } catch {
+      /* nodes may already be gone */
+    }
+  }, 1800);
+}
+
+function playPianoNote(x: number, velocity = 1) {
+  const ctxA = ensureAudio();
+  if (!ctxA) return;
+  const note = xToMidiNote(x);
+  const freq = midiToFreq(note);
+  const now = ctxA.currentTime;
+
+  // fundamentals below ~C3 are barely reproduced by small speakers, so
+  // boost gain and lean harder on the upper harmonics as notes get lower
+  const lowness = Math.max(0, Math.min(1, (48 - note) / 27)); // 0 at C3, 1 at A0
+  const peak = 0.24 * velocity * (1 + lowness * 1.4);
+
+  const osc = ctxA.createOscillator();
+  osc.type = 'triangle';
+  osc.frequency.value = freq;
+  const gain = ctxA.createGain();
+  gain.gain.setValueAtTime(0, now);
+  gain.gain.linearRampToValueAtTime(peak, now + 0.006);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.1);
+  osc.connect(gain).connect(ctxA.destination);
+  applyEcho(ctxA, gain, 0.4);
+
+  const overtone = ctxA.createOscillator();
+  overtone.type = 'sine';
+  overtone.frequency.value = freq * 2;
+  const overtoneGain = ctxA.createGain();
+  overtoneGain.gain.setValueAtTime(0, now);
+  overtoneGain.gain.linearRampToValueAtTime(peak * (0.16 + lowness * 0.32), now + 0.006);
+  overtoneGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
+  overtone.connect(overtoneGain).connect(ctxA.destination);
+
+  osc.start(now);
+  overtone.start(now);
+  osc.stop(now + 1.15);
+  overtone.stop(now + 0.5);
+
+  if (lowness > 0) {
+    // an extra octave-up voice so the lowest keys still have audible
+    // presence even when the fundamental itself falls below hearing range
+    const shimmer = ctxA.createOscillator();
+    shimmer.type = 'sine';
+    shimmer.frequency.value = freq * 4;
+    const shimmerGain = ctxA.createGain();
+    shimmerGain.gain.setValueAtTime(0, now);
+    shimmerGain.gain.linearRampToValueAtTime(peak * 0.22 * lowness, now + 0.006);
+    shimmerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.35);
+    shimmer.connect(shimmerGain).connect(ctxA.destination);
+    shimmer.start(now);
+    shimmer.stop(now + 0.4);
+  }
+}
+
+function playKickSound(velocity = 1) {
+  const ctxA = ensureAudio();
+  if (!ctxA) return;
+  const now = ctxA.currentTime;
+  const peak = 0.8 * (0.6 + 0.4 * velocity);
+
+  const thump = ctxA.createOscillator();
+  thump.type = 'sine';
+  thump.frequency.setValueAtTime(150, now);
+  thump.frequency.exponentialRampToValueAtTime(38, now + 0.16);
+  const thumpGain = ctxA.createGain();
+  thumpGain.gain.setValueAtTime(peak, now);
+  thumpGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.24);
+  thump.connect(thumpGain).connect(ctxA.destination);
+
+  const click = ctxA.createOscillator();
+  click.type = 'square';
+  click.frequency.value = 900;
+  const clickGain = ctxA.createGain();
+  clickGain.gain.setValueAtTime(peak * 0.3, now);
+  clickGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.02);
+  click.connect(clickGain).connect(ctxA.destination);
+
+  // low rumbling tremor bed under the thump, amplitude-wobbled so the
+  // impact reads as a shaking ground rumble rather than a dull thud
+  const rumble = ctxA.createOscillator();
+  rumble.type = 'sawtooth';
+  rumble.frequency.setValueAtTime(65, now);
+  rumble.frequency.exponentialRampToValueAtTime(48, now + 0.4);
+  const rumbleGain = ctxA.createGain();
+  rumbleGain.gain.setValueAtTime(peak * 0.55, now);
+  rumbleGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+
+  const tremor = ctxA.createOscillator();
+  tremor.type = 'sine';
+  tremor.frequency.value = 19; // shaky, growly modulation rate
+  const tremorDepth = ctxA.createGain();
+  tremorDepth.gain.value = peak * 0.4;
+  tremor.connect(tremorDepth);
+  tremorDepth.connect(rumbleGain.gain);
+
+  const rumbleFilter = ctxA.createBiquadFilter();
+  rumbleFilter.type = 'lowpass';
+  rumbleFilter.frequency.value = 220;
+  rumble.connect(rumbleFilter).connect(rumbleGain).connect(ctxA.destination);
+
+  thump.start(now);
+  click.start(now);
+  rumble.start(now);
+  tremor.start(now);
+  thump.stop(now + 0.26);
+  click.stop(now + 0.03);
+  rumble.stop(now + 0.44);
+  tremor.stop(now + 0.44);
+}
+
+function playParrySound() {
+  const ctxA = ensureAudio();
+  if (!ctxA) return;
+  const now = ctxA.currentTime;
+  const peak = 0.5;
+
+  const bell = ctxA.createOscillator();
+  bell.type = 'square';
+  bell.frequency.setValueAtTime(1400, now);
+  bell.frequency.exponentialRampToValueAtTime(900, now + 0.12);
+  const bellGain = ctxA.createGain();
+  bellGain.gain.setValueAtTime(peak, now);
+  bellGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+  bell.connect(bellGain).connect(ctxA.destination);
+  applyEcho(ctxA, bellGain, 0.3);
+
+  const shimmer = ctxA.createOscillator();
+  shimmer.type = 'sine';
+  shimmer.frequency.value = 2200;
+  const shimmerGain = ctxA.createGain();
+  shimmerGain.gain.setValueAtTime(peak * 0.4, now);
+  shimmerGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+  shimmer.connect(shimmerGain).connect(ctxA.destination);
+
+  bell.start(now);
+  shimmer.start(now);
+  bell.stop(now + 0.3);
+  shimmer.stop(now + 0.42);
 }
 
 // ---------- Particles ----------
@@ -205,6 +414,17 @@ function updateShake(dt: number) {
   }
 }
 
+// ---------- Slow motion ----------
+
+const SLOWMO_DURATION = 0.35;
+const SLOWMO_SCALE = 0.25;
+
+let slowMoTimer = 0;
+
+function triggerSlowMo() {
+  slowMoTimer = SLOWMO_DURATION;
+}
+
 // ---------- Player ----------
 
 const PLAYER_W = 44;
@@ -213,6 +433,46 @@ const MOVE_SPEED = 340;
 const GRAVITY = 2100;
 const JUMP_VELOCITY = -820;
 const MAX_JUMP_HEIGHT = (JUMP_VELOCITY * JUMP_VELOCITY) / (2 * GRAVITY);
+
+// shape-unlocked abilities, gated on the permanent heartBonus (highest shape
+// stage ever reached) rather than the live/fluctuating score-based stage
+const DASH_SPEED = 900;
+const DASH_DURATION = 0.18;
+const DASH_COOLDOWN = 0.9;
+const AIR_JUMP_VELOCITY_MULT = 0.82;
+const GLIDE_MAX_FALL_SPEED = 110;
+const GLIDE_GRAVITY_MULT = 0.12;
+
+// a gentle sideways nudge toward the planet's center, standing in for the
+// horizontal component of gravity on a curved surface
+const PLANET_PULL_RATE = 0.12;
+
+function planetPullAt(x: number): number {
+  return -(x - planetCenterX) * PLANET_PULL_RATE;
+}
+
+// parry is a base mechanic available from the start, not shape-gated: a
+// well-timed press right as a hazard connects negates the hit and pays out
+const PARRY_WINDOW = 0.18;
+const PARRY_COOLDOWN = 0.6;
+const PARRY_BONUS = 2;
+
+// consecutive parries build a combo that pays out more, but the combo
+// itself decays if you go too long between successful parries
+const PARRY_COMBO_WINDOW = 3.5;
+const PARRY_COMBO_BONUS_CAP = 8;
+
+let parryCombo = 0;
+let parryComboTimer = 0;
+
+function updateParryCombo(dt: number) {
+  if (parryCombo <= 0) return;
+  parryComboTimer -= dt;
+  if (parryComboTimer <= 0) {
+    parryCombo = 0;
+    parryComboTimer = 0;
+  }
+}
 
 const player = {
   x: 0,
@@ -226,7 +486,16 @@ const player = {
   squashY: 1,
   hitFlash: 0,
   hitCooldown: 0,
+  dashTime: 0,
+  dashCooldown: 0,
+  airJumpsRemaining: 0,
+  parryTime: 0,
+  parryCooldown: 0,
 };
+
+let jumpKeyHeld = false;
+let dashKeyHeld = false;
+let parryKeyHeld = false;
 
 function resetPlayer() {
   player.x = width / 2;
@@ -237,21 +506,75 @@ function resetPlayer() {
   player.surface = null;
   player.hitFlash = 0;
   player.hitCooldown = 0;
+  player.dashTime = 0;
+  player.dashCooldown = 0;
+  player.airJumpsRemaining = 0;
+  player.parryTime = 0;
+  player.parryCooldown = 0;
 }
 
 function updatePlayer(dt: number) {
   if (player.hitFlash > 0) player.hitFlash = Math.max(0, player.hitFlash - dt);
   if (player.hitCooldown > 0) player.hitCooldown = Math.max(0, player.hitCooldown - dt);
+  if (player.dashCooldown > 0) player.dashCooldown = Math.max(0, player.dashCooldown - dt);
+  if (player.parryCooldown > 0) player.parryCooldown = Math.max(0, player.parryCooldown - dt);
+  if (player.parryTime > 0) player.parryTime = Math.max(0, player.parryTime - dt);
+
+  const wantsParry = isDown('control', 'x');
+  const parryPressed = wantsParry && !parryKeyHeld;
+  parryKeyHeld = wantsParry;
+
+  if (parryPressed && player.parryCooldown <= 0 && player.parryTime <= 0) {
+    player.parryTime = PARRY_WINDOW;
+    player.parryCooldown = PARRY_COOLDOWN;
+    spawnBurst(player.x, groundYAt(player.x) - (player.y + PLAYER_H / 2), 8, {
+      speed: 140,
+      colors: ['#38bdf8', '#ffffff'],
+      gravity: 0,
+      size: 3,
+    });
+  }
+
+  const canDash = heartBonus >= 1;
+  const canDoubleJump = heartBonus >= 2;
+  const canGlide = heartBonus >= 3;
+
+  const wantsDash = canDash && isDown('shift');
+  const dashPressed = wantsDash && !dashKeyHeld;
+  dashKeyHeld = wantsDash;
+
+  if (dashPressed && player.dashCooldown <= 0 && player.dashTime <= 0) {
+    player.dashTime = DASH_DURATION;
+    player.dashCooldown = DASH_COOLDOWN;
+    player.hitCooldown = Math.max(player.hitCooldown, DASH_DURATION + 0.05);
+    spawnBurst(player.x, groundYAt(player.x) - (player.y + PLAYER_H / 2), 14, {
+      speed: 240,
+      colors: [STAGE_1.fill, '#ffffff'],
+      gravity: 0,
+      size: 4,
+    });
+  }
+
+  if (player.dashTime > 0) player.dashTime = Math.max(0, player.dashTime - dt);
 
   let moveInput = 0;
   if (isDown('arrowleft', 'a')) moveInput -= 1;
   if (isDown('arrowright', 'd')) moveInput += 1;
-  (window as any).__frameLog = (window as any).__frameLog || [];
-  (window as any).__frameLog.push({ t: performance.now(), keys: [...keys], moveInput });
-  if ((window as any).__frameLog.length > 200) (window as any).__frameLog.shift();
 
-  player.vx = moveInput * MOVE_SPEED * statMultiplier;
-  if (moveInput !== 0) player.facing = moveInput > 0 ? 1 : -1;
+  if (player.dashTime > 0) {
+    player.vx = DASH_SPEED * player.facing * statMultiplier;
+    if (Math.random() < 0.6) {
+      spawnBurst(player.x - player.facing * 12, groundYAt(player.x) - (player.y + PLAYER_H / 2), 1, {
+        speed: 40,
+        colors: ['#ffffff', STAGE_1.fill],
+        gravity: 0,
+        size: 3,
+      });
+    }
+  } else {
+    player.vx = moveInput * MOVE_SPEED * statMultiplier + planetPullAt(player.x);
+    if (moveInput !== 0) player.facing = moveInput > 0 ? 1 : -1;
+  }
 
   player.x += player.vx * dt;
   player.x = Math.max(PLAYER_W / 2 + 12, Math.min(width - PLAYER_W / 2 - 12, player.x));
@@ -262,10 +585,13 @@ function updatePlayer(dt: number) {
   }
 
   const wantsJump = isDown('arrowup', 'w', ' ');
-  if (wantsJump && player.onGround) {
+  const jumpPressed = wantsJump && !jumpKeyHeld;
+  jumpKeyHeld = wantsJump;
+
+  if (jumpPressed && player.onGround) {
     player.vy = JUMP_VELOCITY * statMultiplier;
     player.onGround = false;
-    spawnBurst(player.x, groundY - player.y, 10, {
+    spawnBurst(player.x, groundYAt(player.x) - player.y, 10, {
       speed: 200,
       colors: ['#ffffff', '#d7d7ff'],
       gravity: 600,
@@ -273,12 +599,36 @@ function updatePlayer(dt: number) {
     });
     player.squashY = 1.35;
     player.squashX = 0.75;
+  } else if (jumpPressed && !player.onGround && canDoubleJump && player.airJumpsRemaining > 0) {
+    player.airJumpsRemaining -= 1;
+    player.vy = JUMP_VELOCITY * AIR_JUMP_VELOCITY_MULT * statMultiplier;
+    spawnBurst(player.x, groundYAt(player.x) - (player.y + PLAYER_H / 2), 12, {
+      speed: 220,
+      colors: [STAGE_2.fill, '#ffffff'],
+      gravity: 500,
+      size: 4,
+    });
+    player.squashY = 1.3;
+    player.squashX = 0.8;
   }
 
   const wasOnGround = player.onGround;
 
   if (!player.onGround) {
-    player.vy += GRAVITY * dt;
+    const gliding = canGlide && player.vy > 0 && isDown(' ');
+    if (gliding) {
+      player.vy = Math.min(player.vy + GRAVITY * dt * GLIDE_GRAVITY_MULT, GLIDE_MAX_FALL_SPEED);
+      if (Math.random() < 0.35) {
+        spawnBurst(player.x, groundYAt(player.x) - (player.y + PLAYER_H / 2), 1, {
+          speed: 50,
+          colors: [STAGE_3.fill, '#ffffff'],
+          gravity: -60,
+          size: 3,
+        });
+      }
+    } else {
+      player.vy += GRAVITY * dt;
+    }
   }
 
   const oldY = player.y;
@@ -289,7 +639,7 @@ function updatePlayer(dt: number) {
     const landing = findLanding(oldY, newY, player.x);
     if (landing) {
       if (!wasOnGround) {
-        spawnBurst(player.x, groundY - landing.y, 8, {
+        spawnBurst(player.x, groundYAt(player.x) - landing.y, 8, {
           speed: 160,
           colors: ['#ffffff', '#d7d7ff'],
           gravity: 700,
@@ -302,6 +652,7 @@ function updatePlayer(dt: number) {
       player.vy = 0;
       player.onGround = true;
       player.surface = landing.platform;
+      player.airJumpsRemaining = canDoubleJump ? 1 : 0;
       landed = true;
     }
   }
@@ -412,6 +763,12 @@ function renderExpBar() {
   expFillEl.style.width = `${Math.max(0, Math.min(1, pct)) * 100}%`;
 }
 
+function updateAbilityChips() {
+  dashChipEl.classList.toggle('hidden', heartBonus < 1);
+  jump2ChipEl.classList.toggle('hidden', heartBonus < 2);
+  glideChipEl.classList.toggle('hidden', heartBonus < 3);
+}
+
 function applyStageBonus(stage: PlayerStage) {
   if (stage.index <= heartBonus) return;
   heartBonus = stage.index;
@@ -419,6 +776,7 @@ function applyStageBonus(stage: PlayerStage) {
   hearts = maxHearts;
   statMultiplier = 1 + heartBonus * STAT_BOOST_PER_STAGE;
   renderHearts();
+  updateAbilityChips();
 }
 
 function loseHeart() {
@@ -430,9 +788,12 @@ function loseHeart() {
     maxHearts = BASE_HEARTS;
     hearts = BASE_HEARTS;
     statMultiplier = 1;
+    parryCombo = 0;
+    parryComboTimer = 0;
     scoreEl.textContent = '0';
     renderHearts();
     renderExpBar();
+    updateAbilityChips();
   }
 }
 
@@ -529,14 +890,14 @@ function drawCharacterShadow(cx: number, yHeight: number, scale: number, alpha: 
   ctx.fillStyle = '#000000';
   const shadowScale = Math.max(0.35, 1 - yHeight / MAX_JUMP_HEIGHT) * scale;
   ctx.beginPath();
-  ctx.ellipse(cx, groundY, 22 * shadowScale, 7 * shadowScale, 0, 0, Math.PI * 2);
+  ctx.ellipse(cx, groundYAt(cx), 22 * shadowScale, 7 * shadowScale, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
 
 function drawPlayer() {
   const stage = getPlayerStage(score);
-  const screenY = groundY - player.y;
+  const screenY = groundYAt(player.x) - player.y;
   const w = PLAYER_W * player.squashX * stage.scale;
   const h = PLAYER_H * player.squashY * stage.scale;
   const cx = player.x;
@@ -550,11 +911,26 @@ function drawPlayer() {
   ctx.restore();
 }
 
+function drawParryGlow() {
+  if (player.parryTime <= 0) return;
+  const t = player.parryTime / PARRY_WINDOW;
+  const stage = getPlayerStage(score);
+  const screenY = groundYAt(player.x) - player.y - (PLAYER_H * stage.scale) / 2;
+  ctx.save();
+  ctx.globalAlpha = 0.55 * t;
+  ctx.strokeStyle = '#38bdf8';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(player.x, screenY, (PLAYER_W * stage.scale) * 0.75 + (1 - t) * 16, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawRemotePlayers() {
   for (const p of mp.getRemotePlayers()) {
     const stage = getPlayerStage(p.score);
     const px = p.x * width;
-    const screenY = groundY - p.y;
+    const screenY = groundYAt(px) - p.y;
     const w = PLAYER_W * p.squashX * stage.scale;
     const h = PLAYER_H * p.squashY * stage.scale;
     const cy = screenY - h / 2;
@@ -633,7 +1009,7 @@ function updateCoins(dt: number) {
 
 function drawCoins() {
   for (const c of coins) {
-    const screenY = groundY - c.y - Math.sin(c.bob) * 6;
+    const screenY = groundYAt(c.x) - c.y - Math.sin(c.bob) * 6;
     const scaleX = Math.abs(Math.cos(c.spin));
     ctx.save();
     ctx.translate(c.x, screenY);
@@ -650,7 +1026,7 @@ function drawCoins() {
 }
 
 function triggerTransformation() {
-  const screenY = groundY - (player.y + PLAYER_H / 2);
+  const screenY = groundYAt(player.x) - (player.y + PLAYER_H / 2);
   spawnBurst(player.x, screenY, 36, {
     speed: 420,
     colors: [STAGE_0.fill, STAGE_1.fill, STAGE_2.fill, STAGE_3.fill, '#ffffff', PALETTE.coin],
@@ -670,6 +1046,7 @@ function collectCoin(index: number, screenX: number, screenY: number) {
   score += 1;
   scoreEl.textContent = String(score);
   renderExpBar();
+  playPianoNote(screenX, 0.8);
   spawnBurst(screenX, screenY, 16, {
     speed: 320,
     colors: [PALETTE.coin, PALETTE.coinEdge, '#ffffff'],
@@ -694,7 +1071,7 @@ function checkCoinCollisions() {
     const dy = playerCenterY - c.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < COIN_RADIUS + PLAYER_W * 0.32) {
-      collectCoin(i, c.x, groundY - c.y);
+      collectCoin(i, c.x, groundYAt(c.x) - c.y);
     }
   }
 }
@@ -705,10 +1082,21 @@ interface Platform {
   x: number; // center x
   y: number; // height above ground of the top surface
   w: number;
+  hp: number;
+  maxHp: number;
+}
+
+interface PendingRespawn {
+  timer: number;
 }
 
 const PLATFORM_H = 20;
+const PLATFORM_HP = 3;
+const PLATFORM_RESPAWN_MIN = 4;
+const PLATFORM_RESPAWN_MAX = 7;
+
 const platforms: Platform[] = [];
+const pendingRespawns: PendingRespawn[] = [];
 
 function surfaceContainsX(p: Platform, x: number): boolean {
   const halfW = p.w / 2;
@@ -745,7 +1133,7 @@ function initPlatforms() {
 
   for (let i = 0; i < stepCount; i++) {
     const w = 100 + Math.random() * 70;
-    platforms.push({ x, y, w });
+    platforms.push({ x, y, w, hp: PLATFORM_HP, maxHp: PLATFORM_HP });
 
     if (Math.random() < 0.35) dir *= -1;
     const dx = (110 + Math.random() * 90) * dir;
@@ -766,85 +1154,100 @@ function initPlatforms() {
 
 function drawPlatforms() {
   for (const p of platforms) {
-    const screenY = groundY - p.y;
+    const screenY = groundYAt(p.x) - p.y;
+    const damage = 1 - p.hp / p.maxHp;
+    ctx.save();
     ctx.fillStyle = PALETTE.platformEdge;
     ctx.fillRect(p.x - p.w / 2, screenY, p.w, PLATFORM_H);
     ctx.fillStyle = PALETTE.platform;
     ctx.fillRect(p.x - p.w / 2, screenY, p.w, PLATFORM_H - 6);
     ctx.fillStyle = PALETTE.platformTop;
     ctx.fillRect(p.x - p.w / 2, screenY, p.w, 4);
-  }
-}
 
-// ---------- Obstacles ----------
-
-interface Obstacle {
-  baseX: number;
-  x: number;
-  phase: number;
-  driftSpeed: number;
-  driftRange: number;
-}
-
-const OBSTACLE_W = 30;
-const OBSTACLE_H = 34;
-const obstacles: Obstacle[] = [];
-let obstacleTime = 0;
-
-function randomObstacleBaseX(): number {
-  const margin = 60;
-  return margin + Math.random() * (width - margin * 2);
-}
-
-function spawnObstacle(): Obstacle {
-  const baseX = randomObstacleBaseX();
-  return {
-    baseX,
-    x: baseX,
-    phase: Math.random() * Math.PI * 2,
-    driftSpeed: 0.4 + Math.random() * 0.3,
-    driftRange: 40 + Math.random() * 60,
-  };
-}
-
-function initObstacles() {
-  obstacles.length = 0;
-  const count = 1 + Math.floor(Math.random() * 3);
-  for (let i = 0; i < count; i++) obstacles.push(spawnObstacle());
-}
-
-function updateObstacles(dt: number) {
-  obstacleTime += dt;
-  const half = OBSTACLE_W / 2 + 10;
-  for (const o of obstacles) {
-    o.x = o.baseX + Math.sin(obstacleTime * o.driftSpeed + o.phase) * o.driftRange;
-    o.x = Math.max(half, Math.min(width - half, o.x));
-  }
-}
-
-function drawObstacles() {
-  for (const o of obstacles) {
-    ctx.save();
-    ctx.translate(o.x, groundY);
-    ctx.fillStyle = PALETTE.obstacle;
-    ctx.strokeStyle = PALETTE.obstacleEdge;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(-OBSTACLE_W / 2, 0);
-    ctx.lineTo(0, -OBSTACLE_H);
-    ctx.lineTo(OBSTACLE_W / 2, 0);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
+    if (damage > 0) {
+      const cracks = p.maxHp - p.hp;
+      ctx.strokeStyle = 'rgba(30, 16, 6, 0.65)';
+      ctx.lineWidth = 2;
+      for (let i = 0; i < cracks; i++) {
+        const cx = p.x - p.w / 2 + ((i + 1) / (cracks + 1)) * p.w;
+        ctx.beginPath();
+        ctx.moveTo(cx - 5, screenY + 2);
+        ctx.lineTo(cx + 3, screenY + PLATFORM_H / 2);
+        ctx.lineTo(cx - 4, screenY + PLATFORM_H - 3);
+        ctx.stroke();
+      }
+    }
     ctx.restore();
   }
 }
 
-function hitObstacle(o: Obstacle) {
-  const dir = player.x <= o.x ? -1 : 1;
+function damagePlatform(p: Platform) {
+  p.hp -= 1;
+  spawnBurst(p.x, groundYAt(p.x) - p.y, 10, {
+    speed: 200,
+    colors: [PALETTE.platformEdge, PALETTE.platform, '#ffffff'],
+    gravity: 500,
+    size: 5,
+  });
+  if (p.hp <= 0) {
+    destroyPlatform(p);
+  } else {
+    triggerShake(4, 0.15);
+  }
+}
+
+function destroyPlatform(p: Platform) {
+  const idx = platforms.indexOf(p);
+  if (idx !== -1) platforms.splice(idx, 1);
+  spawnBurst(p.x, groundYAt(p.x) - p.y, 20, {
+    speed: 260,
+    colors: [PALETTE.platformEdge, PALETTE.platform, '#8f5c2e'],
+    gravity: 650,
+    size: 6,
+  });
+  triggerShake(9, 0.25);
+  if (player.surface === p) {
+    player.onGround = false;
+    player.surface = null;
+  }
+  pendingRespawns.push({ timer: PLATFORM_RESPAWN_MIN + Math.random() * (PLATFORM_RESPAWN_MAX - PLATFORM_RESPAWN_MIN) });
+}
+
+function spawnReplacementPlatform() {
+  const margin = 90;
+  let anchorX: number;
+  let anchorY: number;
+  if (platforms.length > 0 && Math.random() < 0.7) {
+    const a = platforms[Math.floor(Math.random() * platforms.length)];
+    anchorX = a.x;
+    anchorY = a.y;
+  } else {
+    anchorX = margin + Math.random() * (width - margin * 2);
+    anchorY = 0;
+  }
+  const dir = Math.random() < 0.5 ? 1 : -1;
+  const x = Math.max(margin, Math.min(width - margin, anchorX + dir * (110 + Math.random() * 90)));
+  const y = Math.min(anchorY + 60 + Math.random() * 70, height - 160);
+  const w = 100 + Math.random() * 70;
+  platforms.push({ x, y, w, hp: PLATFORM_HP, maxHp: PLATFORM_HP });
+}
+
+function updatePlatformRespawns(dt: number) {
+  for (let i = pendingRespawns.length - 1; i >= 0; i--) {
+    pendingRespawns[i].timer -= dt;
+    if (pendingRespawns[i].timer <= 0) {
+      pendingRespawns.splice(i, 1);
+      spawnReplacementPlatform();
+    }
+  }
+}
+
+// ---------- Hit handling ----------
+
+function applyHitPenalty(knockDir: number) {
   player.x = Math.max(
     PLAYER_W / 2 + 12,
-    Math.min(width - PLAYER_W / 2 - 12, player.x + dir * 34),
+    Math.min(width - PLAYER_W / 2 - 12, player.x + knockDir * 34),
   );
   if (player.onGround) {
     player.vy = JUMP_VELOCITY * 0.45;
@@ -853,7 +1256,7 @@ function hitObstacle(o: Obstacle) {
   player.hitFlash = 0.3;
   player.hitCooldown = 0.5;
 
-  const screenY = groundY - (player.y + PLAYER_H / 2);
+  const screenY = groundYAt(player.x) - (player.y + PLAYER_H / 2);
   spawnBurst(player.x, screenY, 12, {
     speed: 260,
     colors: [PALETTE.obstacle, PALETTE.obstacleEdge, '#ffffff'],
@@ -862,29 +1265,379 @@ function hitObstacle(o: Obstacle) {
   });
   triggerShake(8, 0.22);
 
-  if (score > 0) {
-    score = Math.floor(score / 2);
-    scoreEl.textContent = String(score);
-    renderExpBar();
-  } else {
-    loseHeart();
+  loseHeart();
+}
+
+function handleParrySuccess(screenX: number, screenY: number) {
+  player.parryTime = 0;
+  player.hitCooldown = Math.max(player.hitCooldown, 0.25);
+
+  parryCombo += 1;
+  parryComboTimer = PARRY_COMBO_WINDOW;
+  const bonus = PARRY_BONUS + Math.min(parryCombo - 1, PARRY_COMBO_BONUS_CAP);
+
+  const prevStage = getPlayerStage(score);
+  score += bonus;
+  scoreEl.textContent = String(score);
+  renderExpBar();
+  spawnPopup(screenX, screenY - 10, parryCombo > 1 ? `PARRY +${bonus} x${parryCombo}` : `PARRY +${bonus}`);
+  spawnBurst(screenX, screenY, 22, {
+    speed: 380,
+    colors: ['#ffffff', '#FFD23F', '#38bdf8'],
+    gravity: 200,
+    size: 6,
+  });
+  triggerShake(10, 0.2);
+  playParrySound();
+  triggerSlowMo();
+
+  const newStage = getPlayerStage(score);
+  if (newStage.index !== prevStage.index) {
+    triggerTransformation();
+    applyStageBonus(newStage);
   }
 }
 
-function checkObstacleCollisions() {
+// ---------- Meteor shower ----------
+// a recurring dodge-focused set piece: telegraphed rocks rain from the sky
+// in escalating waves, forcing constant movement, then the game returns to
+// its calmer platforming/coin loop until the next shower.
+
+interface Telegraph {
+  x: number;
+  timer: number;
+  duration: number;
+}
+
+interface FallingObstacle {
+  x: number;
+  y: number; // screen y, falls downward from above the viewport
+  vx: number;
+  vy: number;
+  size: number;
+  rotation: number;
+  rotSpeed: number;
+  deflected: boolean; // parried: flying off harmlessly instead of falling
+}
+
+const SHOWER_BASE_DURATION = 10;
+const SHOWER_DURATION_GROWTH = 1.2; // extra seconds of spawning per wave
+const SHOWER_DURATION_GROWTH_CAP = 8; // seconds, so waves don't spawn forever
+const SHOWER_GAP_MIN = 16;
+const SHOWER_GAP_MAX = 26;
+
+const FALL_SPEED_MIN_BASE = 360;
+const FALL_SPEED_MAX_BASE = 620;
+const FALL_SPEED_WAVE_GROWTH = 0.09; // +9% fall speed per wave
+const FALL_SPEED_WAVE_GROWTH_CAP = 10; // waves, so it caps around +90%
+
+// meteors spawn on a musical beat grid instead of a random interval; tempo
+// climbs with each wave, and subdivisions tighten as a wave progresses
+const SHOWER_BPM_BASE = 96;
+const SHOWER_BPM_WAVE_GROWTH = 6;
+const SHOWER_BPM_CAP = 184;
+
+const telegraphs: Telegraph[] = [];
+const fallingObstacles: FallingObstacle[] = [];
+
+let waveIndex = 0;
+
+const shower = {
+  active: false,
+  wave: 0,
+  duration: SHOWER_BASE_DURATION,
+  elapsed: 0,
+  timer: 0,
+  spawnTimer: 0,
+  calmTimer: 8 + Math.random() * 6,
+  tookHit: false,
+  announceTimer: 0,
+  clearTimer: 0,
+};
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function beatSeconds(): number {
+  const bpm = Math.min(SHOWER_BPM_BASE + (shower.wave - 1) * SHOWER_BPM_WAVE_GROWTH, SHOWER_BPM_CAP);
+  return 60 / bpm;
+}
+
+function startShower() {
+  waveIndex += 1;
+  shower.active = true;
+  shower.wave = waveIndex;
+  shower.duration =
+    SHOWER_BASE_DURATION + Math.min((waveIndex - 1) * SHOWER_DURATION_GROWTH, SHOWER_DURATION_GROWTH_CAP);
+  shower.elapsed = 0;
+  shower.timer = shower.duration;
+  shower.spawnTimer = 0.3;
+  shower.tookHit = false;
+  shower.announceTimer = 2.2;
+  triggerShake(6, 0.3);
+}
+
+function awardShowerBonus() {
+  const bonus = 3;
+  const prevStage = getPlayerStage(score);
+  score += bonus;
+  scoreEl.textContent = String(score);
+  renderExpBar();
+  spawnPopup(player.x, groundYAt(player.x) - (player.y + PLAYER_H + 30), `+${bonus} dodge bonus`);
+  const newStage = getPlayerStage(score);
+  if (newStage.index !== prevStage.index) {
+    triggerTransformation();
+    applyStageBonus(newStage);
+  }
+}
+
+function endShower() {
+  shower.active = false;
+  shower.calmTimer = SHOWER_GAP_MIN + Math.random() * (SHOWER_GAP_MAX - SHOWER_GAP_MIN);
+  shower.clearTimer = 1.8;
+  if (!shower.tookHit) awardShowerBonus();
+}
+
+function spawnTelegraph() {
+  const margin = 50;
+  const x = margin + Math.random() * (width - margin * 2);
+  const progress = Math.min(1, shower.elapsed / shower.duration);
+  const duration = lerp(0.75, 0.42, progress);
+  telegraphs.push({ x, timer: duration, duration });
+}
+
+function spawnFallingObstacle(x: number) {
+  const progress = Math.min(1, shower.elapsed / shower.duration);
+  const waveSpeedMult = 1 + Math.min(shower.wave - 1, FALL_SPEED_WAVE_GROWTH_CAP) * FALL_SPEED_WAVE_GROWTH;
+  const size = 16 + Math.random() * 14;
+  const speed = lerp(FALL_SPEED_MIN_BASE, FALL_SPEED_MAX_BASE, progress) * waveSpeedMult * (0.85 + Math.random() * 0.3);
+  fallingObstacles.push({
+    x,
+    y: -40,
+    vx: 0,
+    vy: speed,
+    size,
+    rotation: Math.random() * Math.PI * 2,
+    rotSpeed: (Math.random() - 0.5) * 6,
+    deflected: false,
+  });
+}
+
+function updateShower(dt: number) {
+  if (shower.announceTimer > 0) shower.announceTimer -= dt;
+  if (shower.clearTimer > 0) shower.clearTimer -= dt;
+
+  if (!shower.active) {
+    shower.calmTimer -= dt;
+    if (shower.calmTimer <= 0) startShower();
+    return;
+  }
+
+  shower.elapsed += dt;
+  shower.timer -= dt;
+  shower.spawnTimer -= dt;
+
+  const progress = Math.min(1, shower.elapsed / shower.duration);
+  if (shower.timer > 0 && shower.spawnTimer <= 0) {
+    spawnTelegraph();
+    const subdivision = progress < 0.4 ? 1 : progress < 0.75 ? 0.5 : 0.25;
+    shower.spawnTimer = beatSeconds() * subdivision;
+  }
+
+  if (shower.timer <= 0 && telegraphs.length === 0 && fallingObstacles.length === 0) {
+    endShower();
+  }
+}
+
+function updateTelegraphs(dt: number) {
+  for (let i = telegraphs.length - 1; i >= 0; i--) {
+    const t = telegraphs[i];
+    t.timer -= dt;
+    if (t.timer <= 0) {
+      telegraphs.splice(i, 1);
+      spawnFallingObstacle(t.x);
+    }
+  }
+}
+
+function updateFallingObstacles(dt: number) {
+  for (let i = fallingObstacles.length - 1; i >= 0; i--) {
+    const f = fallingObstacles[i];
+    f.x += f.vx * dt;
+    f.rotation += f.rotSpeed * dt;
+
+    if (f.deflected) {
+      f.vy += GRAVITY * 0.3 * dt;
+      f.y += f.vy * dt;
+      if (f.x < -60 || f.x > width + 60 || f.y > height + 60) {
+        fallingObstacles.splice(i, 1);
+      }
+      continue;
+    }
+
+    const oldWorldY = groundYAt(f.x) - f.y;
+    f.y += f.vy * dt;
+    const newWorldY = groundYAt(f.x) - f.y;
+
+    if (f.y - f.size > height) {
+      fallingObstacles.splice(i, 1);
+      continue;
+    }
+
+    const landing = findLanding(oldWorldY, newWorldY, f.x);
+    if (landing) {
+      spawnBurst(f.x, groundYAt(f.x) - landing.y, 10, {
+        speed: 240,
+        colors: [PALETTE.obstacle, PALETTE.obstacleEdge, '#f97316'],
+        gravity: 650,
+        size: 5,
+      });
+      if (landing.platform) damagePlatform(landing.platform);
+      playKickSound(Math.min(1, f.vy / FALL_SPEED_MAX_BASE));
+      fallingObstacles.splice(i, 1);
+    }
+  }
+}
+
+function hitFallingObstacle(f: FallingObstacle) {
+  const dir = player.x <= f.x ? -1 : 1;
+  applyHitPenalty(dir);
+  if (shower.active) shower.tookHit = true;
+}
+
+function deflectFallingObstacle(f: FallingObstacle) {
+  const dir = player.x <= f.x ? 1 : -1;
+  f.deflected = true;
+  f.vx = dir * 700;
+  f.vy = -Math.abs(f.vy) * 0.6;
+  f.rotSpeed *= 3;
+}
+
+function checkFallingObstacleCollisions() {
   if (player.hitCooldown > 0) return;
-  for (const o of obstacles) {
-    const dx = Math.abs(player.x - o.x);
-    const overlapsX = dx < OBSTACLE_W / 2 + PLAYER_W * 0.35;
-    const overlapsY = player.y < OBSTACLE_H * 0.8;
-    if (overlapsX && overlapsY) {
-      hitObstacle(o);
+  const stage = getPlayerStage(score);
+  const playerScreenY = groundYAt(player.x) - (player.y + (PLAYER_H * stage.scale) / 2);
+  const halfW = (PLAYER_W * stage.scale) / 2 * 0.65;
+  const halfH = (PLAYER_H * stage.scale) / 2 * 0.65;
+  for (let i = fallingObstacles.length - 1; i >= 0; i--) {
+    const f = fallingObstacles[i];
+    if (f.deflected) continue;
+    const dx = Math.abs(player.x - f.x);
+    const dy = Math.abs(playerScreenY - f.y);
+    if (dx < halfW + f.size * 0.7 && dy < halfH + f.size * 0.7) {
+      if (player.parryTime > 0) {
+        deflectFallingObstacle(f);
+        handleParrySuccess(f.x, playerScreenY);
+      } else {
+        fallingObstacles.splice(i, 1);
+        hitFallingObstacle(f);
+      }
       return;
     }
   }
 }
 
+function drawTelegraphs() {
+  for (const t of telegraphs) {
+    const p = 1 - t.timer / t.duration;
+    const pulse = 0.6 + 0.4 * Math.sin(p * Math.PI * 6);
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = '#ff5a5f';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(t.x, 10);
+    ctx.lineTo(t.x - 10, 26);
+    ctx.lineTo(t.x + 10, 26);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = 0.3 + 0.25 * pulse;
+    ctx.fillStyle = '#ff5a5f';
+    ctx.beginPath();
+    ctx.ellipse(t.x, groundYAt(t.x), 26, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawFallingObstacles() {
+  for (const f of fallingObstacles) {
+    ctx.save();
+    ctx.translate(f.x, f.y);
+
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = '#f97316';
+    ctx.beginPath();
+    ctx.moveTo(-f.size * 0.3, -f.size * 2.4);
+    ctx.lineTo(f.size * 0.3, -f.size * 2.4);
+    ctx.lineTo(0, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.rotate(f.rotation);
+    ctx.fillStyle = PALETTE.obstacle;
+    ctx.strokeStyle = PALETTE.obstacleEdge;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    const spikes = 7;
+    for (let i = 0; i < spikes; i++) {
+      const ang = (Math.PI * 2 * i) / spikes;
+      const r = f.size * (i % 2 === 0 ? 1 : 0.7);
+      const px = Math.cos(ang) * r;
+      const py = Math.sin(ang) * r;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawShowerUI() {
+  if (shower.active) {
+    ctx.save();
+    ctx.globalAlpha = 0.16 + 0.08 * Math.sin(performance.now() / 220);
+    ctx.fillStyle = '#ff3b30';
+    ctx.fillRect(0, 0, width, 6);
+    ctx.restore();
+  }
+
+  if (shower.announceTimer > 0) {
+    const alpha =
+      shower.announceTimer > 1.6
+        ? Math.min(1, (2.2 - shower.announceTimer) / 0.6)
+        : Math.min(1, shower.announceTimer / 0.6);
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, alpha);
+    ctx.textAlign = 'center';
+    ctx.font = '800 32px system-ui, sans-serif';
+    ctx.fillStyle = '#ff5a5f';
+    ctx.fillText('METEOR SHOWER — DODGE!', width / 2, 90);
+    ctx.restore();
+  }
+
+  if (shower.clearTimer > 0) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, shower.clearTimer / 0.6));
+    ctx.textAlign = 'center';
+    ctx.font = '800 24px system-ui, sans-serif';
+    ctx.fillStyle = shower.tookHit ? '#FFD23F' : '#4ade80';
+    ctx.fillText(shower.tookHit ? 'Shower cleared' : 'Perfect dodge!', width / 2, 90);
+    ctx.restore();
+  }
+}
+
+
 // ---------- Background ----------
+
+const GROUND_CURVE_STEP = 24;
 
 function drawBackground() {
   const grad = ctx.createLinearGradient(0, 0, 0, height);
@@ -893,10 +1646,27 @@ function drawBackground() {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, width, height);
 
+  ctx.beginPath();
+  ctx.moveTo(0, height);
+  ctx.lineTo(0, groundYAt(0));
+  for (let x = 0; x <= width; x += GROUND_CURVE_STEP) {
+    ctx.lineTo(x, groundYAt(x));
+  }
+  ctx.lineTo(width, groundYAt(width));
+  ctx.lineTo(width, height);
+  ctx.closePath();
   ctx.fillStyle = PALETTE.groundEdge;
-  ctx.fillRect(0, groundY, width, height - groundY);
-  ctx.fillStyle = PALETTE.ground;
-  ctx.fillRect(0, groundY, width, 10);
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(0, groundYAt(0));
+  for (let x = 0; x <= width; x += GROUND_CURVE_STEP) {
+    ctx.lineTo(x, groundYAt(x));
+  }
+  ctx.strokeStyle = PALETTE.ground;
+  ctx.lineWidth = 10;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
 }
 
 // ---------- Game loop ----------
@@ -905,18 +1675,34 @@ let score = 0;
 let lastTime = performance.now();
 
 function frame(now: number) {
-  const dt = Math.min(0.033, (now - lastTime) / 1000);
+  const rawDt = Math.min(0.033, (now - lastTime) / 1000);
   lastTime = now;
+
+  let dt = rawDt;
+  if (slowMoTimer > 0) {
+    dt = rawDt * SLOWMO_SCALE;
+    slowMoTimer = Math.max(0, slowMoTimer - rawDt);
+  }
 
   updatePlayer(dt);
   updateCoins(dt);
-  updateObstacles(dt);
+  updateShower(dt);
+  updateTelegraphs(dt);
+  updateFallingObstacles(dt);
+  updatePlatformRespawns(dt);
+  updateParryCombo(dt);
   updateParticles(dt);
   updatePopups(dt);
   updateShake(dt);
   mp.updateRemotePlayers(dt);
   checkCoinCollisions();
-  checkObstacleCollisions();
+  checkFallingObstacleCollisions();
+
+  parryChipEl.textContent = parryCombo > 1 ? `🛡 Parry ×${parryCombo}` : '🛡 Parry — Ctrl/X';
+  parryChipEl.classList.toggle('cooling', player.parryCooldown > 0 && player.parryTime <= 0);
+  parryChipEl.classList.toggle('active', player.parryTime > 0);
+  if (heartBonus >= 1) dashChipEl.classList.toggle('cooling', player.dashCooldown > 0 || player.dashTime > 0);
+  if (heartBonus >= 3) glideChipEl.classList.toggle('active', player.vy > 0 && !player.onGround && isDown(' '));
 
   mp.sendPlayerState({
     x: player.x / width,
@@ -940,12 +1726,15 @@ function frame(now: number) {
 
   drawBackground();
   drawPlatforms();
-  drawObstacles();
+  drawTelegraphs();
   drawCoins();
   drawRemotePlayers();
   drawPlayer();
+  drawParryGlow();
+  drawFallingObstacles();
   drawParticles();
   drawPopups();
+  drawShowerUI();
 
   ctx.restore();
 
@@ -958,11 +1747,9 @@ resize();
 initPlatforms();
 resetPlayer();
 initCoins();
-initObstacles();
 renderHearts();
 renderExpBar();
+updateAbilityChips();
 mp.onCoinEvent(applyRemoteCoin);
 mp.initMultiplayer();
 requestAnimationFrame(frame);
-
-(window as any).__debug = { player, keys, platforms, coins, width, height, groundY, isDown, updatePlayer };
