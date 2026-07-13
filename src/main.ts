@@ -14,6 +14,8 @@ const jump2ChipEl = document.querySelector<HTMLDivElement>('#jump2-chip')!;
 const glideChipEl = document.querySelector<HTMLDivElement>('#glide-chip')!;
 const hintEl = document.querySelector<HTMLDivElement>('#hint')!;
 const onlineCountEl = document.querySelector<HTMLSpanElement>('#online-count')!;
+const chatLogEl = document.querySelector<HTMLDivElement>('#chat-log')!;
+const chatInputEl = document.querySelector<HTMLInputElement>('#chat-input')!;
 
 let width = 0;
 let height = 0;
@@ -82,6 +84,24 @@ function markInput() {
 }
 
 window.addEventListener('keydown', (e) => {
+  if (document.activeElement === chatInputEl) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendChatFromInput();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeChatInput();
+    }
+    return;
+  }
+
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    markInput();
+    openChatInput();
+    return;
+  }
+
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' '].includes(e.key)) {
     e.preventDefault();
   }
@@ -89,11 +109,60 @@ window.addEventListener('keydown', (e) => {
   markInput();
 });
 window.addEventListener('keyup', (e) => {
+  if (document.activeElement === chatInputEl) return;
   keys.delete(e.key.toLowerCase());
 });
 
 function isDown(...names: string[]) {
   return names.some((n) => keys.has(n));
+}
+
+// ---------- Chat ----------
+
+const CHAT_BUBBLE_DURATION = 4;
+const CHAT_LOG_FADE_DELAY = 6000;
+
+let localChatText = '';
+let localChatTimer = 0;
+let chatFadeTimeout: number | undefined;
+
+function openChatInput() {
+  chatInputEl.classList.remove('hidden');
+  chatInputEl.value = '';
+  chatInputEl.focus();
+  keys.clear();
+}
+
+function closeChatInput() {
+  chatInputEl.classList.add('hidden');
+  chatInputEl.blur();
+}
+
+function addChatLogEntry(color: string, label: string, text: string) {
+  const line = document.createElement('div');
+  line.className = 'chat-line';
+  const tag = document.createElement('span');
+  tag.className = 'chat-tag';
+  tag.style.color = color;
+  tag.textContent = `${label}:`;
+  line.appendChild(tag);
+  line.appendChild(document.createTextNode(text));
+  chatLogEl.appendChild(line);
+  while (chatLogEl.children.length > 6) chatLogEl.removeChild(chatLogEl.firstChild!);
+
+  chatLogEl.classList.remove('faded');
+  window.clearTimeout(chatFadeTimeout);
+  chatFadeTimeout = window.setTimeout(() => chatLogEl.classList.add('faded'), CHAT_LOG_FADE_DELAY);
+}
+
+function sendChatFromInput() {
+  const text = chatInputEl.value.trim().slice(0, 80);
+  closeChatInput();
+  if (!text) return;
+  mp.sendChatMessage(text);
+  addChatLogEntry(mp.localPlayerColor, 'You', text);
+  localChatText = text;
+  localChatTimer = CHAT_BUBBLE_DURATION;
 }
 
 // ---------- Audio ----------
@@ -895,6 +964,39 @@ function drawCharacterShadow(cx: number, yHeight: number, scale: number, alpha: 
   ctx.restore();
 }
 
+function drawSpeechBubble(x: number, topY: number, text: string, color: string, alpha: number) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = '700 13px system-ui, sans-serif';
+  const paddingX = 10;
+  const w = Math.min(220, ctx.measureText(text).width + paddingX * 2);
+  const h = 26;
+  const bx = x - w / 2;
+  const by = topY - h - 14;
+
+  ctx.fillStyle = 'rgba(20, 12, 40, 0.88)';
+  roundRect(bx, by, w, h, 9);
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  roundRect(bx, by, w, h, 9);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(x - 6, by + h - 1);
+  ctx.lineTo(x + 6, by + h - 1);
+  ctx.lineTo(x, by + h + 7);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(20, 12, 40, 0.88)';
+  ctx.fill();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, by + h / 2 + 1, w - paddingX);
+  ctx.restore();
+}
+
 function drawPlayer() {
   const stage = getPlayerStage(score);
   const screenY = groundYAt(player.x) - player.y;
@@ -909,6 +1011,11 @@ function drawPlayer() {
   ctx.translate(cx, cy);
   drawCharacterBody(w, h, stage, stage.fill, stage.stroke, player.facing, player.hitFlash);
   ctx.restore();
+
+  if (localChatTimer > 0) {
+    const alpha = Math.min(1, localChatTimer / 0.5);
+    drawSpeechBubble(cx, cy - h / 2, localChatText, stage.fill, alpha);
+  }
 }
 
 function drawParryGlow() {
@@ -943,6 +1050,11 @@ function drawRemotePlayers() {
     drawCharacterBody(w, h, stage, p.color, '#1a1a1a', p.facing, 0);
     ctx.restore();
     ctx.globalAlpha = 1;
+
+    if (p.chatTimer > 0) {
+      const alpha = Math.min(1, p.chatTimer / 0.5);
+      drawSpeechBubble(px, cy - h / 2, p.chatText, p.color, alpha);
+    }
   }
 }
 
@@ -1694,6 +1806,7 @@ function frame(now: number) {
   updateParticles(dt);
   updatePopups(dt);
   updateShake(dt);
+  if (localChatTimer > 0) localChatTimer = Math.max(0, localChatTimer - dt);
   mp.updateRemotePlayers(dt);
   checkCoinCollisions();
   checkFallingObstacleCollisions();
@@ -1751,5 +1864,8 @@ renderHearts();
 renderExpBar();
 updateAbilityChips();
 mp.onCoinEvent(applyRemoteCoin);
+mp.onChatMessage((id, color, text) => {
+  addChatLogEntry(color, id.slice(0, 4).toUpperCase(), text);
+});
 mp.initMultiplayer();
 requestAnimationFrame(frame);

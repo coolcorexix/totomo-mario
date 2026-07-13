@@ -32,7 +32,11 @@ export interface RemotePlayerState {
   targetX: number;
   targetY: number;
   lastSeen: number;
+  chatText: string;
+  chatTimer: number;
 }
+
+const CHAT_BUBBLE_DURATION = 4;
 
 export interface CoinPayload {
   id: string;
@@ -41,9 +45,11 @@ export interface CoinPayload {
 }
 
 type CoinEventHandler = (removedId: string, newCoin: CoinPayload, collectorId: string) => void;
+type ChatEventHandler = (id: string, color: string, text: string) => void;
 
 const remotePlayers = new Map<string, RemotePlayerState>();
 const coinEventHandlers: CoinEventHandler[] = [];
+const chatEventHandlers: ChatEventHandler[] = [];
 
 let channel: RealtimeChannel | null = null;
 let ready = false;
@@ -58,6 +64,10 @@ export function onlineCount(): number {
 
 export function onCoinEvent(handler: CoinEventHandler) {
   coinEventHandlers.push(handler);
+}
+
+export function onChatMessage(handler: ChatEventHandler) {
+  chatEventHandlers.push(handler);
 }
 
 function upsertRemote(payload: {
@@ -95,6 +105,8 @@ function upsertRemote(payload: {
       squashY: payload.squashY,
       score: payload.score,
       lastSeen: now,
+      chatText: '',
+      chatTimer: 0,
     });
   }
 }
@@ -105,6 +117,7 @@ export function updateRemotePlayers(dt: number) {
     const ease = Math.min(1, dt * 12);
     p.x += (p.targetX - p.x) * ease;
     p.y += (p.targetY - p.y) * ease;
+    if (p.chatTimer > 0) p.chatTimer = Math.max(0, p.chatTimer - dt);
     if (now - p.lastSeen > 8000) remotePlayers.delete(id);
   }
 }
@@ -140,6 +153,15 @@ export function broadcastCoinCollected(removedId: string, newCoin: CoinPayload) 
   });
 }
 
+export function sendChatMessage(text: string) {
+  if (!ready || !channel) return;
+  channel.send({
+    type: 'broadcast',
+    event: 'chat',
+    payload: { id: localPlayerId, color: localPlayerColor, text },
+  });
+}
+
 export function initMultiplayer() {
   const url = import.meta.env.VITE_SUPABASE_URL;
   const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -167,6 +189,15 @@ export function initMultiplayer() {
         collectorId: string;
       };
       for (const handler of coinEventHandlers) handler(removedId, newCoin, collectorId);
+    })
+    .on('broadcast', { event: 'chat' }, ({ payload }) => {
+      const { id, color, text } = payload as { id: string; color: string; text: string };
+      const existing = remotePlayers.get(id);
+      if (existing) {
+        existing.chatText = text;
+        existing.chatTimer = CHAT_BUBBLE_DURATION;
+      }
+      for (const handler of chatEventHandlers) handler(id, color, text);
     })
     .on('presence', { event: 'leave' }, ({ key }) => {
       remotePlayers.delete(key);

@@ -172,3 +172,60 @@ body {
 #hint.hidden {
   opacity: 0;
 }
+
+#chat-log {
+  position: absolute;
+  left: 16px;
+  bottom: 60px;
+  width: 280px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 4px;
+  user-select: none;
+  pointer-events: none;
+  transition: opacity 1s ease;
+}
+
+#chat-log.faded {
+  opacity: 0;
+}
+
+.chat-line {
+  background: rgba(20, 12, 40, 0.55);
+  backdrop-filter: blur(4px);
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.92);
+  word-break: break-word;
+  max-width: fit-content;
+}
+
+.chat-tag {
+  font-weight: 800;
+  margin-right: 3px;
+}
+
+#chat-input {
+  position: absolute;
+  left: 16px;
+  bottom: 20px;
+  width: 260px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  background: rgba(20, 12, 40, 0.8);
+  color: #ffffff;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  pointer-events: auto;
+}
+
+#chat-input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+#chat-input.hidden {
+  display: none;
+}
