@@ -16,6 +16,7 @@ const hintEl = document.querySelector<HTMLDivElement>('#hint')!;
 const onlineCountEl = document.querySelector<HTMLSpanElement>('#online-count')!;
 const chatLogEl = document.querySelector<HTMLDivElement>('#chat-log')!;
 const chatInputEl = document.querySelector<HTMLInputElement>('#chat-input')!;
+const victoryOverlayEl = document.querySelector<HTMLDivElement>('#victory-overlay')!;
 
 let width = 0;
 let height = 0;
@@ -1148,6 +1149,31 @@ function triggerTransformation() {
   triggerShake(14, 0.35);
 }
 
+// reaching the final evolution stage is the win condition for this level
+let gameWon = false;
+
+function triggerVictory() {
+  if (gameWon) return;
+  gameWon = true;
+  const screenY = groundYAt(player.x) - (player.y + PLAYER_H / 2);
+  spawnBurst(player.x, screenY, 60, {
+    speed: 480,
+    colors: [STAGE_0.fill, STAGE_1.fill, STAGE_2.fill, STAGE_3.fill, '#ffffff', PALETTE.coin],
+    gravity: 250,
+    size: 8,
+  });
+  triggerShake(18, 0.5);
+  victoryOverlayEl.classList.remove('hidden');
+}
+
+function onStageUp(newStage: PlayerStage) {
+  triggerTransformation();
+  applyStageBonus(newStage);
+  if (newStage.index === PLAYER_STAGES_ASC.length - 1) {
+    triggerVictory();
+  }
+}
+
 function collectCoin(index: number, screenX: number, screenY: number) {
   const prevStage = getPlayerStage(score);
   const removedId = coins[index].id;
@@ -1170,8 +1196,7 @@ function collectCoin(index: number, screenX: number, screenY: number) {
 
   const newStage = getPlayerStage(score);
   if (newStage.index !== prevStage.index) {
-    triggerTransformation();
-    applyStageBonus(newStage);
+    onStageUp(newStage);
   }
 }
 
@@ -1405,8 +1430,132 @@ function handleParrySuccess(screenX: number, screenY: number) {
 
   const newStage = getPlayerStage(score);
   if (newStage.index !== prevStage.index) {
-    triggerTransformation();
-    applyStageBonus(newStage);
+    onStageUp(newStage);
+  }
+}
+
+// ---------- Volcanoes ----------
+// underground vents fixed along the ground: each cycles idle -> rumbling
+// warning -> eruption (a lava column the player must be clear of, by
+// distance or by jumping over it) -> cooldown, on its own independent timer.
+
+interface Volcano {
+  x: number;
+  state: 'idle' | 'warning' | 'erupt' | 'cool';
+  timer: number;
+}
+
+const VOLCANO_COUNT = 3;
+const VOLCANO_WARNING = 0.9;
+const VOLCANO_ERUPT = 0.5;
+const VOLCANO_COOL = 3.2;
+const VOLCANO_IDLE_MIN = 2;
+const VOLCANO_IDLE_MAX = 4.5;
+const VOLCANO_RADIUS = 46; // ground danger half-width while erupting
+const VOLCANO_DANGER_HEIGHT = 115; // must jump roughly this high to clear it
+const VOLCANO_CONE_W = 70;
+const VOLCANO_CONE_H = 50;
+
+const volcanoes: Volcano[] = [];
+
+function initVolcanoes() {
+  volcanoes.length = 0;
+  const margin = Math.max(100, width * 0.15);
+  const usable = width - margin * 2;
+  for (let i = 0; i < VOLCANO_COUNT; i++) {
+    const x = margin + (usable * i) / (VOLCANO_COUNT - 1);
+    volcanoes.push({
+      x,
+      state: 'idle',
+      timer: VOLCANO_IDLE_MIN + Math.random() * (VOLCANO_IDLE_MAX - VOLCANO_IDLE_MIN) + i * 1.3,
+    });
+  }
+}
+
+function updateVolcanoes(dt: number) {
+  for (const v of volcanoes) {
+    v.timer -= dt;
+    if (v.timer > 0) continue;
+
+    if (v.state === 'idle') {
+      v.state = 'warning';
+      v.timer = VOLCANO_WARNING;
+    } else if (v.state === 'warning') {
+      v.state = 'erupt';
+      v.timer = VOLCANO_ERUPT;
+      const gy = groundYAt(v.x);
+      spawnBurst(v.x, gy - VOLCANO_CONE_H, 26, {
+        speed: 340,
+        colors: ['#ff6a3d', '#ffb84d', PALETTE.obstacle, PALETTE.obstacleEdge],
+        gravity: 850,
+        size: 6,
+      });
+      triggerShake(6, 0.2);
+    } else if (v.state === 'erupt') {
+      v.state = 'cool';
+      v.timer = VOLCANO_COOL;
+    } else {
+      v.state = 'idle';
+      v.timer = VOLCANO_IDLE_MIN + Math.random() * (VOLCANO_IDLE_MAX - VOLCANO_IDLE_MIN);
+    }
+  }
+}
+
+function checkVolcanoCollisions() {
+  if (player.hitCooldown > 0) return;
+  for (const v of volcanoes) {
+    if (v.state !== 'erupt') continue;
+    const dx = Math.abs(player.x - v.x);
+    if (dx < VOLCANO_RADIUS && player.y < VOLCANO_DANGER_HEIGHT) {
+      applyHitPenalty(player.x <= v.x ? -1 : 1);
+      return;
+    }
+  }
+}
+
+function drawVolcanoes() {
+  for (const v of volcanoes) {
+    const gy = groundYAt(v.x);
+    const top = gy - VOLCANO_CONE_H;
+
+    let jitter = 0;
+    if (v.state === 'warning') {
+      jitter = (Math.random() - 0.5) * 3 * (1 - v.timer / VOLCANO_WARNING);
+    }
+
+    ctx.save();
+    ctx.translate(jitter, 0);
+
+    ctx.fillStyle = PALETTE.obstacleEdge;
+    ctx.strokeStyle = '#2a2422';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(v.x - VOLCANO_CONE_W / 2, gy);
+    ctx.lineTo(v.x - VOLCANO_CONE_W * 0.22, top);
+    ctx.lineTo(v.x + VOLCANO_CONE_W * 0.22, top);
+    ctx.lineTo(v.x + VOLCANO_CONE_W / 2, gy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    const glow =
+      v.state === 'erupt' ? 1 : v.state === 'warning' ? 0.4 + Math.sin(performance.now() / 80) * 0.3 : 0.18;
+    ctx.globalAlpha = Math.max(0.12, glow);
+    ctx.fillStyle = v.state === 'erupt' ? '#ffb84d' : '#ff6a3d';
+    ctx.beginPath();
+    ctx.ellipse(v.x, top + 4, VOLCANO_CONE_W * 0.24, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    if (v.state === 'erupt') {
+      const grad = ctx.createLinearGradient(v.x, top, v.x, top - 70);
+      grad.addColorStop(0, 'rgba(255, 120, 50, 0.85)');
+      grad.addColorStop(1, 'rgba(255, 120, 50, 0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(v.x - VOLCANO_RADIUS * 0.5, top - 70, VOLCANO_RADIUS, 70);
+    }
+
+    ctx.restore();
   }
 }
 
@@ -1499,8 +1648,7 @@ function awardShowerBonus() {
   spawnPopup(player.x, groundYAt(player.x) - (player.y + PLAYER_H + 30), `+${bonus} dodge bonus`);
   const newStage = getPlayerStage(score);
   if (newStage.index !== prevStage.index) {
-    triggerTransformation();
-    applyStageBonus(newStage);
+    onStageUp(newStage);
   }
 }
 
@@ -1796,20 +1944,26 @@ function frame(now: number) {
     slowMoTimer = Math.max(0, slowMoTimer - rawDt);
   }
 
-  updatePlayer(dt);
-  updateCoins(dt);
-  updateShower(dt);
-  updateTelegraphs(dt);
-  updateFallingObstacles(dt);
-  updatePlatformRespawns(dt);
-  updateParryCombo(dt);
+  if (!gameWon) {
+    updatePlayer(dt);
+    updateCoins(dt);
+    updateShower(dt);
+    updateTelegraphs(dt);
+    updateFallingObstacles(dt);
+    updateVolcanoes(dt);
+    updatePlatformRespawns(dt);
+    updateParryCombo(dt);
+  }
   updateParticles(dt);
   updatePopups(dt);
   updateShake(dt);
   if (localChatTimer > 0) localChatTimer = Math.max(0, localChatTimer - dt);
   mp.updateRemotePlayers(dt);
-  checkCoinCollisions();
-  checkFallingObstacleCollisions();
+  if (!gameWon) {
+    checkCoinCollisions();
+    checkFallingObstacleCollisions();
+    checkVolcanoCollisions();
+  }
 
   parryChipEl.textContent = parryCombo > 1 ? `🛡 Parry ×${parryCombo}` : '🛡 Parry — Ctrl/X';
   parryChipEl.classList.toggle('cooling', player.parryCooldown > 0 && player.parryTime <= 0);
@@ -1838,6 +1992,7 @@ function frame(now: number) {
   }
 
   drawBackground();
+  drawVolcanoes();
   drawPlatforms();
   drawTelegraphs();
   drawCoins();
@@ -1858,6 +2013,7 @@ function frame(now: number) {
 
 resize();
 initPlatforms();
+initVolcanoes();
 resetPlayer();
 initCoins();
 renderHearts();

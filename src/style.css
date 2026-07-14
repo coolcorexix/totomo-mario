@@ -229,3 +229,39 @@ body {
 #chat-input.hidden {
   display: none;
 }
+
+#victory-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 6, 20, 0.72);
+  backdrop-filter: blur(4px);
+  z-index: 20;
+}
+
+#victory-overlay.hidden {
+  display: none;
+}
+
+#victory-panel {
+  max-width: 340px;
+  text-align: center;
+  padding: 32px 28px;
+  border-radius: 20px;
+  background: rgba(20, 12, 40, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+#victory-title {
+  font-size: 22px;
+  font-weight: 800;
+  margin-bottom: 10px;
+}
+
+#victory-subtitle {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.72);
+  line-height: 1.5;
+}
