@@ -17,6 +17,8 @@ const onlineCountEl = document.querySelector<HTMLSpanElement>('#online-count')!;
 const chatLogEl = document.querySelector<HTMLDivElement>('#chat-log')!;
 const chatInputEl = document.querySelector<HTMLInputElement>('#chat-input')!;
 const victoryOverlayEl = document.querySelector<HTMLDivElement>('#victory-overlay')!;
+const victoryReplayBtnEl = document.querySelector<HTMLButtonElement>('#victory-replay-btn')!;
+const levelSelectOverlayEl = document.querySelector<HTMLDivElement>('#level-select-overlay')!;
 
 let width = 0;
 let height = 0;
@@ -1174,6 +1176,40 @@ function onStageUp(newStage: PlayerStage) {
   }
 }
 
+// ---------- Level select ----------
+
+let gameStarted = false;
+
+function startLevel() {
+  gameStarted = true;
+  levelSelectOverlayEl.classList.add('hidden');
+}
+
+function returnToLevelSelect() {
+  gameStarted = false;
+  gameWon = false;
+  victoryOverlayEl.classList.add('hidden');
+
+  score = 0;
+  heartBonus = 0;
+  maxHearts = BASE_HEARTS;
+  hearts = BASE_HEARTS;
+  statMultiplier = 1;
+  parryCombo = 0;
+  parryComboTimer = 0;
+  scoreEl.textContent = '0';
+  renderHearts();
+  renderExpBar();
+  updateAbilityChips();
+
+  resetPlayer();
+  initCoins();
+  initVolcanoes();
+  initPlatforms();
+
+  levelSelectOverlayEl.classList.remove('hidden');
+}
+
 function collectCoin(index: number, screenX: number, screenY: number) {
   const prevStage = getPlayerStage(score);
   const removedId = coins[index].id;
@@ -1944,7 +1980,7 @@ function frame(now: number) {
     slowMoTimer = Math.max(0, slowMoTimer - rawDt);
   }
 
-  if (!gameWon) {
+  if (gameStarted && !gameWon) {
     updatePlayer(dt);
     updateCoins(dt);
     updateShower(dt);
@@ -1959,7 +1995,7 @@ function frame(now: number) {
   updateShake(dt);
   if (localChatTimer > 0) localChatTimer = Math.max(0, localChatTimer - dt);
   mp.updateRemotePlayers(dt);
-  if (!gameWon) {
+  if (gameStarted && !gameWon) {
     checkCoinCollisions();
     checkFallingObstacleCollisions();
     checkVolcanoCollisions();
@@ -2024,4 +2060,8 @@ mp.onChatMessage((id, color, text) => {
   addChatLogEntry(color, id.slice(0, 4).toUpperCase(), text);
 });
 mp.initMultiplayer();
+
+document.querySelector<HTMLButtonElement>('.level-card[data-level="1"]')!.addEventListener('click', startLevel);
+victoryReplayBtnEl.addEventListener('click', returnToLevelSelect);
+
 requestAnimationFrame(frame);
